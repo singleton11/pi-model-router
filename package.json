@@ -1,0 +1,26 @@
+{
+  "name": "pi-model-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A small qualifier model chooses Pi's execution model and reasoning effort.",
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "keywords": ["pi-package"],
+  "pi": { "extensions": ["./src/index.ts"] },
+  "files": ["src", "README.md"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.99.1",
+    "@earendil-works/pi-coding-agent": "0.99.1",
+    "@types/node": "^22.19.0",
+    "typescript": "~5.9.3"
+  }
+}
