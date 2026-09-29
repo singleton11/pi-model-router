@@ -29,7 +29,7 @@ Uses Pi's native virtual-model API. **Tested with Pi 0.99.1 and Node 22.19+ APIs
    For a persistent local install:
 
    ```sh
-   pi install /absolute/path/to/pi-model-router
+   pi install npm:@singleton11/pi-model-router
    ```
 
    Then `/reload` and select **Auto (model router)** in `/model`. Saving Auto as a startup default is your choice; the extension never changes defaults.

@@ -1,7 +1,6 @@
 {
-  "name": "pi-model-router",
+  "name": "@singleton11/pi-model-router",
   "version": "0.1.0",
-  "private": true,
   "description": "A small qualifier model chooses Pi's execution model and reasoning effort.",
   "type": "module",
   "engines": { "node": ">=22.19.0" },
