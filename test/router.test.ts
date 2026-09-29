@@ -79,6 +79,48 @@ test("a user turn selects exact model and effort using one tool-free qualifier c
   assert(!JSON.stringify(h.records).includes("Fix the bug"));
 });
 
+test("qualifier guidance prioritizes capability and task complexity over price/cache savings", async () => {
+  const h = setup();
+  await routeRequest(request(), h.ctx, config);
+  const prompt = h.calls[0]!.input.systemPrompt!;
+  assert.match(prompt, /Prioritize reliable, correct completion over token savings/);
+  assert.match(prompt, /small model with off\/minimal\/low/);
+  assert.match(prompt, /Default to medium for substantive implementation, debugging, and code review/);
+  assert.match(prompt, /Prefer high[\s\S]*architecture, security, or unclear requirements/);
+  assert.match(prompt, /Apply this guidance only within allowed thinkingLevels/);
+  assert.match(prompt, /Choose model capability separately from effort/);
+  assert.match(prompt, /tie-breakers only among comparably suitable model\/effort pairs/);
+  assert.match(prompt, /Reassess each new task independently/);
+  assert.match(prompt, /short message can imply substantial work/);
+  assert.match(prompt, /Return exactly one JSON object with only these string keys: provider, model, thinkingLevel/);
+  assert.doesNotMatch(prompt, /Choose the least expensive candidate and lowest allowed effort/);
+});
+
+test("a new substantive user task can upgrade a cheaper previous model and minimal effort", async () => {
+  const cheap = model("cheap", { cost: { input: 0.1, output: 0.5, cacheRead: 0, cacheWrite: 0 } });
+  const h = setup();
+  h.available([qualifier, cheap, executor, auto]);
+  const result = await routeRequest(request({
+    messages: [user("Diagnose the cross-service race and review the security implications")],
+    previous: { model: cheap, thinkingLevel: "minimal" },
+  }), h.ctx, config, h.options);
+  assert.equal(result.model, executor);
+  assert.equal(result.thinkingLevel, "high");
+  assert.equal(h.records[0]!.outcome, "selected");
+  const payload = JSON.parse(h.calls[0]!.input.messages[0]!.content as string);
+  assert.deepEqual(payload.previous, { provider: cheap.provider, model: cheap.id, thinkingLevel: "minimal" });
+});
+
+test("quality-oriented guidance still accepts cheap minimal effort for a trivial task", async () => {
+  const cheap = model("cheap", { cost: { input: 0.1, output: 0.5, cacheRead: 0, cacheWrite: 0 } });
+  const h = setup(() => decision(cheap, "minimal"));
+  h.available([qualifier, cheap, executor, auto]);
+  const result = await routeRequest(request({ messages: [user("Show the git status")] }), h.ctx, config, h.options);
+  assert.equal(result.model, cheap);
+  assert.equal(result.thinkingLevel, "minimal");
+  assert.equal(h.records[0]!.outcome, "selected");
+});
+
 test("context projection preserves follow-up context but excludes system/tools/reasoning/images", async () => {
   const h = setup();
   const history: ModelRouteRequest["messages"] = [

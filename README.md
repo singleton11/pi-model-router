@@ -70,11 +70,13 @@ If the current request includes images—including historical tool-result images
 | Automatic retry | Keep the failed route, or previous route if absent. |
 | Direct request, such as compaction | Previous route, otherwise eligible qualifier; no classification. |
 
+Qualification is **quality-first**: assess task complexity, uncertainty, and model capability before cost. The prompt suggests medium effort for substantive implementation/debugging/review, high for difficult or higher-risk work, and low effort for trivial tasks, always within the allowed levels. Price and cache reuse are tie-breakers among comparably suitable choices, not reasons to avoid a needed upgrade. These are qualifier instructions, not enforced effort floors or a benchmarked capability ranking.
+
 The qualifier receives bounded task/recent-conversation text and candidate metadata. It does **not** receive the full system prompt, tools, tool outputs, reasoning blocks, or image bytes. The executor receives Pi's normal context and tools; the extension never rewrites that context. Pi still owns compaction and retries.
 
 Qualifier calls use no tools, the qualifier's lowest supported effort, a 512-token output allowance (capped by the model's output limit), no SDK retries where supported, and a **5-second deadline**. Input uses a conservative byte-based context allowance plus a fixed 32 KB cap; oversized catalogs fall back visibly rather than dropping candidates. Narrow `/scoped-models` when needed.
 
-Only complete successful JSON selecting an eligible model and permitted effort is accepted. There is no repair prompt, automatic escalation, or phase switching.
+Only complete successful JSON selecting an eligible model and permitted effort is accepted. A new user turn can select a stronger model or higher effort; there is no repair prompt, mid-turn automatic escalation, or phase switching.
 
 ### Failure and cancellation
 
