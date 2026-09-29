@@ -1,116 +1,98 @@
 # Pi Model Router
 
-A minimal Pi extension: a small **qualifier** model picks the execution model and reasoning effort for each new user turn. No model tiers, ranking database, provider SDKs, or custom UI.
+A Pi extension that routes each new user turn to a physical model and supported thinking level. A configured **qualifier** model makes one structured decision; Pi then runs the selected executor with its normal prompt, tools, and context.
 
-Uses Pi's native virtual-model API. **Tested with Pi 0.99.1 and Node 22.19+ APIs.** Older Pi versions without virtual models are unsupported.
+No model rankings or tier database: choices use the models available in your Pi installation and any active model scope.
 
-## Setup
+> **Compatibility:** Requires Pi with the native virtual-model API (tested with Pi 0.99.1) and Node.js 22.19 or newer.
 
-1. Authenticate your models with Pi (`/login`). Use `pi --list-models` to find exact provider/model IDs.
-2. Create `~/.pi/agent/model-router.json` (or `model-router.json` inside `PI_CODING_AGENT_DIR`):
+## Install
 
-   ```json
-   {
-     "qualifier": {
-       "provider": "your-provider",
-       "model": "your-small-model-id"
-     }
-   }
-   ```
+First, authenticate at least one provider in Pi and confirm its models appear in `pi --list-models`.
 
-   Replace the placeholders with one available **physical chat model**, not a virtual router or a classifier-only model. Existing Pi credentials are reused; do not put secrets in this file. A small model that reliably produces JSON is a good starting point.
+Install the published npm package for your personal Pi setup:
 
-3. From this checkout, try it without changing your installed packages or defaults:
+```sh
+pi install npm:@singleton11/pi-model-router
+```
 
-   ```sh
-   pi -e ./src/index.ts --model router/auto
-   ```
+Pi packages can execute code. Review the [source](https://github.com/singleton11/pi-model-router) before installing if you want to inspect what will run.
 
-   For a persistent local install:
+Create `~/.pi/agent/model-router.json` (or `model-router.json` inside the directory selected by `PI_CODING_AGENT_DIR`) and choose an authenticated **physical chat model** as the qualifier:
 
-   ```sh
-   pi install npm:@singleton11/pi-model-router
-   ```
+```json
+{
+  "qualifier": {
+    "provider": "your-provider",
+    "model": "your-small-model-id"
+  }
+}
+```
 
-   Then `/reload` and select **Auto (model router)** in `/model`. Saving Auto as a startup default is your choice; the extension never changes defaults.
+Use the exact provider and model IDs shown by Pi. The qualifier should follow instructions and return JSON reliably; existing Pi credentials are reused. Do not put API keys or other secrets in this file.
 
-The virtual thinking level is `off`; **this does not disable the executor's reasoning**. Physical effort is selected automatically and shown with the dispatched model in Pi's normal footer and the router status.
+Restart Pi (or run `/reload` in a running session), then open `/model` and select **Auto (model router)**. To verify it is active, send a new user message: the footer shows the physical model and effort chosen for execution. Choosing a physical model in `/model` bypasses routing. The extension never changes your startup model default.
 
-Select a physical model in `/model` to bypass routing for subsequent requests. Edit the qualifier config and `/reload` to change it. An absent/invalid config only prevents Auto requests; ordinary model selection remains usable.
+### Try it without installing
 
-For embedded SDK use, set `PI_CODING_AGENT_DIR` as well as the SDK's `agentDir` if you override it: Pi's public `getAgentDir()` helper, used by this extension, reads the environment/default location.
+To load directly from a checkout for one Pi invocation:
 
-### Status/footer troubleshooting
+```sh
+pi -e ./src/index.ts --model router/auto
+```
 
-The router publishes only the `model-router` status; it never replaces or hides Pi's footer. If the whole footer disappears, distinguish that from missing model/effort text. With `pi-zentui` installed, try `/zentui footer` and choose **Native** to isolate its replacement footer. Custom footers may not display Pi's physical dispatch or correctly resolve virtual-model context limits. Run `/reload` after updating this extension.
+## Configure eligible models
 
-## Execution candidates and scope
-
-With no model scope, Auto considers every authenticated physical chat model in Pi's current registry. With a resolved scope, only its physical models are eligible, including any pinned effort levels. The configured qualifier can be outside the execution scope.
-
-Use Pi's `/scoped-models` to restrict providers/models. **Include `router/auto` alongside your physical execution models.** Selecting only Auto leaves no executors; the router errors rather than broadening that scope.
+By default, Auto can choose from all authenticated physical chat models in Pi's registry. Use Pi's `/scoped-models` to limit the execution candidates. Include `router/auto` **and** the physical models you want available; a scope containing only Auto has no executor and fails closed. The qualifier can be outside the execution scope.
 
 For a one-off scoped launch (replace the example IDs):
 
 ```sh
-pi -e ./src/index.ts --model router/auto \
+pi --model router/auto \
   --models 'router/auto,your-provider/small-model,your-provider/strong-model'
 ```
 
-Pi exposes resolved scopes, not raw CLI patterns, to extensions. A saved `enabledModels` scope that resolves to nothing is rejected. An entirely unmatched CLI-only `--models` list is indistinguishable from no scope through that API; including the registered `router/auto` prevents this ambiguity. Scopes restrict dispatch, not the qualifier's explicitly configured provider.
+Only image-capable models are eligible when the conversation contains images, including images in historical tool results. Effort choices are limited to each model's supported thinking levels and any scope pins.
 
-If the current request includes images—including historical tool-result images—only image-capable models are eligible. The router does not deliberately let Pi replace images with placeholders.
-
-## Routing policy
+## How routing works
 
 | Request | Behavior |
 | --- | --- |
-| New user message, queued steering or follow-up | One qualifier call selects model + effort. |
-| Tool/extension continuation | Keep the previous physical route. |
-| Automatic retry | Keep the failed route, or previous route if absent. |
-| Direct request, such as compaction | Previous route, otherwise eligible qualifier; no classification. |
+| New user message, queued steering, or follow-up | One qualifier call chooses an executor and effort. |
+| Tool/extension continuation | Retains the previous physical route. |
+| Automatic retry | Retains the failed route (or previous route if unavailable). |
+| Direct request, such as compaction | Uses the previous route, or the eligible qualifier; no classification. |
 
-Qualification is **quality-first**: assess task complexity, uncertainty, and model capability before cost. The prompt suggests medium effort for substantive implementation/debugging/review, high for difficult or higher-risk work, and low effort for trivial tasks, always within the allowed levels. Price and cache reuse are tie-breakers among comparably suitable choices, not reasons to avoid a needed upgrade. These are qualifier instructions, not enforced effort floors or a benchmarked capability ranking.
+Routing is quality-first: the qualifier is instructed to consider task complexity, uncertainty, risk, and model capability before cost. The guidance suggests medium effort for substantive implementation, debugging, and review; high for difficult or higher-risk work; and low for trivial tasks, always within supported levels. Price and cache reuse are tie-breakers between comparably suitable choices—not capability rankings or enforced effort floors.
 
-The qualifier receives bounded task/recent-conversation text and candidate metadata. It does **not** receive the full system prompt, tools, tool outputs, reasoning blocks, or image bytes. The executor receives Pi's normal context and tools; the extension never rewrites that context. Pi still owns compaction and retries.
+The qualifier receives bounded task and recent-conversation text plus candidate metadata. It does **not** receive the full system prompt, tools, tool outputs, reasoning blocks, or image bytes. The selected executor receives Pi's normal context and tools. A new user turn can select a stronger model or higher effort; there is no mid-turn escalation or phase switching.
 
-Qualifier calls use no tools, the qualifier's lowest supported effort, a 512-token output allowance (capped by the model's output limit), no SDK retries where supported, and a **5-second deadline**. Input uses a conservative byte-based context allowance plus a fixed 32 KB cap; oversized catalogs fall back visibly rather than dropping candidates. Narrow `/scoped-models` when needed.
+Qualifier calls use no tools, the qualifier's lowest supported effort, a 512-token output limit (capped by its model limit), and a five-second deadline. If qualification fails or times out, the router reuses the previous eligible route. If none is available, the qualifier is used as executor only when eligible; otherwise the request stops with an error rather than silently choosing an arbitrary or out-of-scope model. User cancellation is propagated without fallback.
 
-Only complete successful JSON selecting an eligible model and permitted effort is accepted. A new user turn can select a stronger model or higher effort; there is no repair prompt, mid-turn automatic escalation, or phase switching.
+Successful decisions and fallback outcomes are recorded as `model-router.decision` session entries. Qualifier usage is **not** included in Pi's executor totals; account for it separately when evaluating cost or savings. Timed-out providers may not report usage, and late responses are discarded.
 
-### Failure and cancellation
+## Troubleshooting
 
-- Qualification fails or times out: reuse the previous eligible model/effort.
-- No usable previous route: use the qualifier itself at its lowest permitted effort **only when it is an eligible executor**, respecting scope pins and image support.
-- No eligible fallback: stop with an actionable error. No arbitrary model or out-of-scope dispatch.
-- A sticky continuation/retry becomes ineligible: stop rather than silently switching models.
-- User cancellation: propagate it without falling back. Late qualifier responses cannot trigger execution or session writes. An uncooperative provider may still finish/bill its already-started request.
+- **Auto does not appear in `/model`:** Check Pi compatibility, then run `/reload` or restart Pi. Confirm the package is installed with `pi list` and enabled with `pi config`.
+- **Auto reports a missing/invalid qualifier:** Check the JSON syntax and exact authenticated provider/model IDs in `model-router.json`; then `/reload`.
+- **No eligible executor:** Expand the model scope to include `router/auto` and at least one authenticated physical chat model that supports the request (including vision for image-bearing context).
+- **Footer is missing:** The router publishes only its own status and does not replace Pi's footer. If `pi-zentui` is installed, try `/zentui footer` and choose **Native** to isolate its replacement footer.
 
-Fallback produces a short UI warning (stderr in print/JSON mode). Successful decisions and fallback outcomes are stored as `model-router.decision` custom session entries: qualifier reference, outcome, duration, reported usage, reason code, selected model/effort. Prompt excerpts and raw provider errors are not copied into these records.
+For embedded SDK use, set `PI_CODING_AGENT_DIR` as well as the SDK's `agentDir` if you override it: Pi's public `getAgentDir()` helper reads the environment/default location.
 
-**Qualifier usage is not added to Pi's executor totals by these custom entries.** Count it separately when evaluating savings. A provider may not report usage for a timed-out request; a discarded late response is not retrospectively recorded.
-
-## Development and verification
+## Development
 
 ```sh
 npm ci --ignore-scripts
 npm run check
 ```
 
-Pi host packages are peers and pinned development dependencies; they are not bundled runtime dependencies. There is no build step: Pi loads the TypeScript extension directly.
+Pi host packages are peer dependencies and development dependencies; they are not bundled as runtime dependencies. Pi loads the TypeScript extension directly—there is no build step. Tests make no paid model calls. They cover routing policy, validation, fallback, scopes, effort pins, images, cancellation/deadlines, Pi SDK integration, reload/resume behavior, and native regular/fullscreen TUI footer output.
 
-Tests make **no paid model calls**:
+The extension entry point and package manifest are `src/index.ts` and `package.json`; `src/router.ts` contains routing policy.
 
-- Policy tests: all routing reasons, validation, fallback, scopes/pins, images, input bounds, cancellation/deadlines and late results.
-- Real Pi SDK tests: load `src/index.ts` through Pi's extension loader; exercise model/effort dispatch, normal tool execution, steering/follow-up, retry, compaction, abort, reload (including during qualification), persisted resume and manual bypass with the built-in faux provider.
-- Native regular/fullscreen TUI tests with a disposable terminal: Auto selection, first/current route status, manual bypass and reload restoration. These verify footer component output, not a real terminal's on-screen rendering.
+## Evaluation and limitations
 
-Source is deliberately small: `src/index.ts` wires configuration/registration/records; `src/router.ts` contains routing policy.
+This extension does not guarantee better quality or lower cost. Before making Auto your default, compare representative tasks with your usual fixed-model setup. Include qualifier latency and usage, cache misses, quality, and fallback rate; catalog prices are not actual marginal costs for subscription models. Model switches may lose prompt caches or trigger compaction, and the qualifier's learned model knowledge may be stale.
 
-### Optional live evaluation
-
-The extension is not a benchmarked quality or savings guarantee. Before making Auto your default, try about ten representative tasks against your usual fixed-model baseline in disposable workspaces: simple edits, explanation, debugging, multi-file changes and short follow-ups. Record success, total tokens/catalog cost **including qualifier entries**, routing delay and fallback rate in a small table. For subscription models, catalog prices are not actual marginal billing.
-
-The qualifier's learned model knowledge may be stale; catalog prices are not intelligence rankings. Model switches can lose prompt caches or trigger compaction. Auto permits your normal conversation to be sent to any eligible execution provider, and the excerpt to the qualifier provider—restrict the pool if this matters.
-
-See [the approved MVP plan](docs/mvp-plan.md) and [the Google Doc reference](docs/google-doc.md). Local documentation and the review document are not automatically synchronized.
+Auto may send your conversation to any eligible execution provider and a bounded excerpt to the configured qualifier provider. Restrict the candidate scope and choose providers accordingly.
