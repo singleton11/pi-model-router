@@ -55,32 +55,47 @@ export default function modelRouter(pi: ExtensionAPI): void {
     thinkingLevels: ["off"], // Virtual selection only; physical effort is automatic.
     async route(request, ctx) {
       request.signal?.throwIfAborted();
-      if (ctx.hasUI && ctx.model?.provider === "router" && ctx.model.id === "auto") {
-        ctx.ui.setStatus("model-router", ctx.ui.theme.fg("dim", "Classifying…"));
-      }
       if (!config) throw new Error(configError);
       // Pi collapses an unresolved settings scope to []; don't mistake it for unrestricted.
       if (ctx.scopedModels.length === 0 && pi.getSettings().enabledModels?.length) {
         throw new Error("Router: the configured model scope resolved to no models. Include router/auto and available physical models in /scoped-models.");
       }
-      const route = await routeRequest(request, ctx, config, {
-        onDecision(record) {
-          request.signal?.throwIfAborted();
-          // Pi rejects stale APIs after reload/replacement. Do not swallow that error:
-          // an old route must not write into or dispatch from a new session.
-          pi.appendEntry("model-router.decision", record);
-          if (record.outcome === "fallback") {
-            const selected = record.selected!;
-            const hint = record.reason === "input-too-large" ? " Narrow /scoped-models." : "";
-            const notice = `Router fallback (${record.reason}): ${selected.provider}/${selected.model} · ${selected.thinkingLevel}.${hint}`;
-            if (ctx.hasUI) ctx.ui.notify(notice, "warning");
-            else console.error(notice);
-          }
-        },
-      });
-      request.signal?.throwIfAborted();
-      pi.getSettings(); // Also assert the runtime is still active on non-qualifying paths.
-      return route;
+      const showStatus = ctx.hasUI && ctx.model?.provider === "router" && ctx.model.id === "auto";
+      if (showStatus && request.reason === "user") {
+        ctx.ui.setStatus("model-router", ctx.ui.theme.fg("dim", "Classifying…"));
+      }
+      try {
+        const route = await routeRequest(request, ctx, config, {
+          onDecision(record) {
+            request.signal?.throwIfAborted();
+            // Pi rejects stale APIs after reload/replacement. Do not swallow that error:
+            // an old route must not write into or dispatch from a new session.
+            pi.appendEntry("model-router.decision", record);
+            if (record.outcome === "fallback") {
+              const selected = record.selected!;
+              const hint = record.reason === "input-too-large" ? " Narrow /scoped-models." : "";
+              const notice = `Router fallback (${record.reason}): ${selected.provider}/${selected.model} · ${selected.thinkingLevel}.${hint}`;
+              if (ctx.hasUI) ctx.ui.notify(notice, "warning");
+              else console.error(notice);
+            }
+          },
+        });
+        request.signal?.throwIfAborted();
+        pi.getSettings(); // Also assert the runtime is still active on non-qualifying paths.
+        if (showStatus) {
+          ctx.ui.setStatus("model-router", ctx.ui.theme.fg("dim",
+            `→ ${route.model.provider}/${route.model.id} · ${route.thinkingLevel}`));
+        }
+        return route;
+      } catch (error) {
+        // Restore the last completed route if qualification failed or was cancelled.
+        // A stale extension after reload must not write into the replacement UI.
+        try {
+          pi.getSettings();
+          if (showStatus) updateStatus(ctx);
+        } catch { /* old runtime was replaced */ }
+        throw error;
+      }
     },
   });
 }

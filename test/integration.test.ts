@@ -305,12 +305,30 @@ for (const tuiMode of ["regular", "fullscreen"] as const) {
     assert(lines().some((line) => line.includes(h.dir)), "directory footer remains visible on Auto selection");
     assert.equal(lines().at(-1), "Auto · awaiting first route");
 
-    h.responses([choice("executor", "high"), fauxAssistantMessage("First route")]);
+    h.responses([
+      async () => {
+        assert.equal(lines().at(-1), "Classifying…", "only qualification shows progress");
+        return choice("executor", "high");
+      },
+      async () => {
+        assert.equal(lines().at(-1), "→ faux/executor · high", "route replaces progress before execution");
+        return fauxAssistantMessage("First route");
+      },
+    ]);
     await h.session.prompt("First route");
     assert.equal(lines().at(-1), "→ faux/executor · high", "message_end uses its authoritative message before persistence");
     assert(lines().some((line) => line.includes("auto → executor")), "native selection/dispatch footer remains visible");
 
-    h.responses([choice("executor", "low"), fauxAssistantMessage("Second route")]);
+    h.responses([
+      async () => {
+        assert.equal(lines().at(-1), "Classifying…", "next user turn shows progress again");
+        return choice("executor", "low");
+      },
+      async () => {
+        assert.equal(lines().at(-1), "→ faux/executor · low", "progress ends before the next reply");
+        return fauxAssistantMessage("Second route");
+      },
+    ]);
     await h.session.prompt("Second route");
     assert.equal(lines().at(-1), "→ faux/executor · low", "status does not lag one reply behind");
 
