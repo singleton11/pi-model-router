@@ -55,6 +55,9 @@ export default function modelRouter(pi: ExtensionAPI): void {
     thinkingLevels: ["off"], // Virtual selection only; physical effort is automatic.
     async route(request, ctx) {
       request.signal?.throwIfAborted();
+      if (ctx.hasUI && ctx.model?.provider === "router" && ctx.model.id === "auto") {
+        ctx.ui.setStatus("model-router", ctx.ui.theme.fg("dim", "Classifying…"));
+      }
       if (!config) throw new Error(configError);
       // Pi collapses an unresolved settings scope to []; don't mistake it for unrestricted.
       if (ctx.scopedModels.length === 0 && pi.getSettings().enabledModels?.length) {
