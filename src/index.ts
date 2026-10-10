@@ -15,7 +15,7 @@ export default function modelRouter(pi: ExtensionAPI): void {
     config = parseConfig(JSON.parse(readFileSync(path, "utf8")));
   } catch {
     // Do not expose file contents or make ordinary, non-Auto sessions unusable.
-    configError = `Router: configure ${path} with {"qualifier":{"provider":"exact-provider","model":"exact-model-id"}}, then /reload.`;
+    configError = `Router: configure ${path} with a physical qualifier {"qualifier":{"provider":"exact-provider","model":"exact-model-id"}} or a decision qualifier {"qualifier":{"backend":"typesafe|openai","model":"exact-model-id"}} (requires the backend API key), then /reload.`;
   }
 
   const isCompletedRoute = (message: AssistantMessage) =>

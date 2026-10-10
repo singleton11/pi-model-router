@@ -139,6 +139,39 @@ test("file-loaded extension dispatches model+effort, keeps tool loops sticky, an
   assert.deepEqual(h.settings.getSettings(), h.initialSettings);
 });
 
+test("file-loaded OpenAI decision backend routes through an overridden endpoint without chat qualification", async (t) => {
+  const h = await fixture(t);
+  await writeFile(h.configPath, JSON.stringify({ qualifier: { backend: "openai", model: "gpt-6-luna",
+    endpoint: "https://gateway.example.test/v1/decisions", apiKeyEnv: "ROUTER_TEST_KEY" } }));
+  await h.session.reload();
+  const previousKey = process.env.ROUTER_TEST_KEY;
+  process.env.ROUTER_TEST_KEY = "test-secret";
+  t.after(() => { if (previousKey === undefined) delete process.env.ROUTER_TEST_KEY;
+    else process.env.ROUTER_TEST_KEY = previousKey; });
+  let decisionCalls = 0;
+  t.mock.method(globalThis, "fetch", async (url: string | URL | Request, init?: RequestInit) => {
+    decisionCalls++;
+    assert.equal(url, "https://gateway.example.test/v1/decisions");
+    assert.equal((init?.headers as Record<string, string>).Authorization, "Bearer test-secret");
+    const payload = JSON.parse(init?.body as string);
+    const choice = payload.questions[0].choices.find((item: { description: string }) => {
+      const description = JSON.parse(item.description);
+      return description.model === "executor" && description.thinkingLevel === "high";
+    });
+    assert(choice);
+    return new Response(JSON.stringify({ answers: [{ name: "route", type: "choice", choice: choice.value }],
+      usage: { input_tokens: 20, output_tokens: 0 } }));
+  });
+  h.responses([fauxAssistantMessage("Decision routed")]);
+  await h.session.prompt("Implement the new feature");
+  assert.equal(h.session.getLastAssistantText(), "Decision routed");
+  assert.deepEqual(h.calls.map((call) => call.model), ["executor"]);
+  assert.equal(h.calls[0]?.options?.reasoning, "high");
+  assert.equal(decisionCalls, 1);
+  assert.equal(h.decisions().length, 1);
+  assert(!JSON.stringify(h.decisions()).includes("test-secret"));
+});
+
 test("invalid qualifier JSON executes the eligible fallback and emits a bounded notice/record", async (t) => {
   const h = await fixture(t);
   const warnings: unknown[][] = [];

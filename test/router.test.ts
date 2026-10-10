@@ -37,6 +37,8 @@ function setup(response: () => AssistantMessage | Promise<AssistantMessage> = ()
     scopedModels: [],
     modelRegistry: {
       getAvailable: () => available,
+      findOfType: () => undefined,
+      classify: async () => { throw new Error("Unexpected native classifier call"); },
       streamSimple(model, input, options) {
         calls.push({ model, input, options });
         const stream = createAssistantMessageEventStream();
@@ -48,6 +50,28 @@ function setup(response: () => AssistantMessage | Promise<AssistantMessage> = ()
   return { ctx, calls, records, options: { onDecision: (record: RoutingRecord) => records.push(record) },
     available: (models: Model<Api>[]) => { available = models; } };
 }
+
+test("configuration accepts legacy chat and strict TypeSafe decision backends", () => {
+  const typesafe = { qualifier: { backend: "typesafe", model: "jev-latest",
+    fallback: { provider: "test", model: "small" } } };
+  assert.deepEqual(parseConfig(typesafe), typesafe);
+  assert.deepEqual(parseConfig({ qualifier: { backend: "typesafe", model: "jev-latest" } }),
+    { qualifier: { backend: "typesafe", model: "jev-latest" } });
+  assert.deepEqual(parseConfig({ qualifier: { backend: "openai", model: "gpt-6-luna",
+    endpoint: "https://gateway.example.test/v1/decisions", apiKeyEnv: "GATEWAY_KEY" } }),
+    { qualifier: { backend: "openai", model: "gpt-6-luna",
+      endpoint: "https://gateway.example.test/v1/decisions", apiKeyEnv: "GATEWAY_KEY" } });
+  for (const bad of [
+    { qualifier: { backend: "typesafe", model: "" } },
+    { qualifier: { backend: "typesafe", model: "jev-latest", endpoint: "http://remote.example/v1/systemone" } },
+    { qualifier: { backend: "openai", model: "gpt-6-luna", endpoint: "https://u:p@example.com/v1/decisions" } },
+    { qualifier: { backend: "openai", model: "gpt-6-luna", endpoint: "https://example.com/v1/decisions#secret" } },
+    { qualifier: { backend: "openai", model: "gpt-6-luna", apiKeyEnv: "OPENAI_KEY;evil" } },
+    { qualifier: { backend: "typesafe", model: "jev-latest", apiKey: "secret" } },
+    { qualifier: { backend: "typesafe", model: "jev-latest", fallback: { provider: "test" } } },
+    { qualifier: { backend: "other", model: "jev-latest" } },
+  ]) assert.throws(() => parseConfig(bad), /Expected/);
+});
 
 test("configuration requires just an exact physical qualifier reference", () => {
   assert.deepEqual(parseConfig(config), config);
@@ -298,6 +322,230 @@ test("timeout aborts the qualifier, returns once, and ignores a late answer", as
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(h.records.length, 1);
   assert.equal(h.calls.length, 1);
+});
+
+test("direct Jev uses Pi's classifier registry and credential resolution, never a raw key", async () => {
+  const h = setup();
+  let input: unknown;
+  let signal: AbortSignal | undefined;
+  Object.assign(h.ctx.modelRegistry, {
+    findOfType: (type: string, provider: string, id: string) => {
+      assert.deepEqual([type, provider, id], ["classifier", "typesafe", "jev-latest"]);
+      return { provider, id, api: "typesafe-systemone" };
+    },
+    classify: async (_model: unknown, context: unknown, options: { signal?: AbortSignal }) => {
+      input = context;
+      signal = options.signal;
+      const route = (context as { questions: { route: { criteria: Record<string, string> } } }).questions.route;
+      const choice = Object.keys(route.criteria).find((key) => {
+        const pair = JSON.parse(route.criteria[key]!);
+        return pair.model === executor.id && pair.thinkingLevel === "high";
+      });
+      assert(choice);
+      return { stopReason: "stop", answers: { route: { type: "choice", choice } },
+        usage: { input: 25, output: 1, totalTokens: 26, cost: { total: 0 } } };
+    },
+  });
+  const route = await routeRequest(request({ messages: [user("Fix the bug"),
+    { role: "toolResult", toolCallId: "t", toolName: "read", timestamp: 0,
+      content: [{ type: "text", text: "SECRET_TOOL" }], isError: false }] }), h.ctx,
+    parseConfig({ qualifier: { backend: "typesafe", model: "jev-latest" } }), h.options);
+  assert.equal(route.model, executor);
+  assert.equal(route.thinkingLevel, "high");
+  assert(signal);
+  assert.equal(h.calls.length, 0);
+  assert(!JSON.stringify(input).includes("SECRET_TOOL"));
+  assert.equal((input as { state: { task: string } }).state.task, "Fix the bug");
+  assert.deepEqual(h.records[0]?.usage, { input: 25, output: 1, totalTokens: 26, cost: { total: 0 } });
+});
+
+test("direct Jev returns only the explicit fallback when Pi cannot classify", async () => {
+  const h = setup();
+  const config = parseConfig({ qualifier: { backend: "typesafe", model: "jev-latest",
+    fallback: { provider: "test", model: "small" } } });
+  const route = await routeRequest(request(), h.ctx, config, h.options);
+  assert.equal(route.model, qualifier);
+  assert.equal(h.records[0]?.reason, "provider-error");
+  assert.equal(h.records[0]?.outcome, "fallback");
+});
+
+test("TypeSafe calls the decision endpoint with bounded projected state and exact model/effort options", async () => {
+  const h = setup();
+  const typesafe = parseConfig({ qualifier: { backend: "typesafe", model: "jev-latest" } });
+  let input: Record<string, unknown> = {};
+  const fetcher = (async (url: string | URL | Request, init?: RequestInit) => {
+    assert.equal(url, "https://api.typesafe.ai/v1/systemone");
+    assert.equal(init?.method, "POST");
+    assert.equal((init?.headers as Record<string, string>).Authorization, "Bearer test-key");
+    input = JSON.parse(init?.body as string);
+    const route = (input.questions as { route: { criteria: Record<string, { model: string; thinkingLevel: string }> } }).route;
+    assert.equal(Object.keys(route.criteria).length > 2, true);
+    const id = Object.keys(route.criteria).find((key) => route.criteria[key]?.model === executor.id &&
+      route.criteria[key]?.thinkingLevel === "high");
+    assert(id);
+    return new Response(JSON.stringify({ model: "jev-1.13.0", answers: { route: { type: "choice", choice: id,
+      probabilities: { [id]: 1 }, confidence: 1 } }, usage: { input_tokens: 100, output_tokens: 12 } }), { status: 200 });
+  }) as typeof fetch;
+  const result = await routeRequest(request({ messages: [
+    { role: "system", content: "SECRET_SYSTEM", timestamp: 0 }, user("Fix the bug"),
+    { role: "toolResult", toolCallId: "t", toolName: "read", timestamp: 0,
+      content: [{ type: "text", text: "SECRET_TOOL" }], isError: false },
+  ] }), h.ctx, typesafe, { ...h.options, fetch: fetcher, decisionKey: "test-key" });
+  assert.equal(result.model, executor);
+  assert.equal(result.thinkingLevel, "high");
+  assert.equal(h.calls.length, 0, "decision backend does not make a Pi chat call");
+  assert(!JSON.stringify(input).includes("SECRET_"));
+  assert.equal(input.model, "jev-latest");
+  assert.deepEqual(h.records[0]?.usage, { input_tokens: 100, output_tokens: 12 });
+  assert(!JSON.stringify(h.records).includes("test-key"));
+});
+
+test("TypeSafe full endpoint override uses the System One shape, not the OpenAI shape", async () => {
+  const h = setup();
+  const typesafe = parseConfig({ qualifier: { backend: "typesafe", model: "jev-latest",
+    endpoint: "https://gateway.example.test/v1/systemone" } });
+  const fetcher = (async (url: string | URL | Request, init?: RequestInit) => {
+    assert.equal(url, "https://gateway.example.test/v1/systemone");
+    const payload = JSON.parse(init?.body as string);
+    assert.equal(payload.questions.route.type, "choice");
+    assert.equal(payload.input, undefined);
+    const choice = Object.keys(payload.questions.route.criteria).find((id) =>
+      payload.questions.route.criteria[id].model === executor.id);
+    return new Response(JSON.stringify({ answers: { route: { type: "choice", choice } } }));
+  }) as typeof fetch;
+  assert.equal((await routeRequest(request(), h.ctx, typesafe,
+    { ...h.options, fetch: fetcher, decisionKey: "key" })).model, executor);
+});
+
+test("OpenAI Decisions uses its own wire format and a configurable full endpoint", async () => {
+  const h = setup();
+  const openai = parseConfig({ qualifier: { backend: "openai", model: "gpt-6-luna",
+    endpoint: "https://gateway.example.test/v1/decisions", apiKeyEnv: "GATEWAY_KEY" } });
+  let calls = 0;
+  const fetcher = (async (url: string | URL | Request, init?: RequestInit) => {
+    calls++;
+    assert.equal(url, "https://gateway.example.test/v1/decisions");
+    assert.equal(init?.redirect, "error");
+    assert.equal((init?.headers as Record<string, string>).Authorization, "Bearer decision-test-key");
+    const payload = JSON.parse(init?.body as string);
+    assert.equal(payload.model, "gpt-6-luna");
+    assert.equal(typeof payload.input, "string");
+    assert.equal(JSON.parse(payload.input).task, "Fix the bug");
+    assert.equal(payload.questions.length, 1);
+    assert.equal(payload.questions[0].name, "route");
+    assert.equal(payload.questions[0].type, "choice");
+    const choice = payload.questions[0].choices.find((entry: { value: string; description: string }) => {
+      const description = JSON.parse(entry.description);
+      return description.model === executor.id && description.thinkingLevel === "high";
+    });
+    assert(choice);
+    return new Response(JSON.stringify({ answers: [{ name: "route", type: "choice", choice: choice.value,
+      confidence: 1, probabilities: [{ value: choice.value, probability: 1 }] }],
+      usage: { input_tokens: 42, output_tokens: 0, total_tokens: 42 } }));
+  }) as typeof fetch;
+  const prior = process.env.GATEWAY_KEY;
+  process.env.GATEWAY_KEY = "decision-test-key";
+  try {
+    const route = await routeRequest(request(), h.ctx, openai, { ...h.options, fetch: fetcher });
+    assert.equal(route.model, executor);
+    assert.equal(route.thinkingLevel, "high");
+    assert.equal(calls, 1);
+    assert.equal(h.calls.length, 0);
+    assert.deepEqual(h.records[0]?.usage, { input_tokens: 42, output_tokens: 0 });
+    assert(!JSON.stringify(h.records).includes("decision-test-key"));
+  } finally {
+    if (prior === undefined) delete process.env.GATEWAY_KEY;
+    else process.env.GATEWAY_KEY = prior;
+  }
+});
+
+test("OpenAI refusals and non-OpenAI-shaped replies fall back without guessing", async () => {
+  const h = setup();
+  const openai = parseConfig({ qualifier: { backend: "openai", model: "gpt-6-luna",
+    fallback: { provider: "test", model: "small" } } });
+  for (const answers of [[{ name: "route", type: "refusal" }],
+    { route: { type: "choice", choice: "option_0" } },
+    [{ name: "other", type: "choice", choice: "option_0" }]]) {
+    const fetcher = (async () => new Response(JSON.stringify({ answers }))) as typeof fetch;
+    const route = await routeRequest(request(), h.ctx, openai,
+      { ...h.options, fetch: fetcher, decisionKey: "test-key" });
+    assert.equal(route.model, qualifier);
+    assert.equal(h.records.at(-1)?.reason, "invalid-output");
+  }
+});
+
+test("TypeSafe failures use only previous/explicit fallback; invalid options and disappeared routes never dispatch", async () => {
+  const h = setup();
+  const typesafe = parseConfig({ qualifier: { backend: "typesafe", model: "jev-latest",
+    fallback: { provider: "test", model: "small" } } });
+  const bad = (async () => new Response(JSON.stringify({ answers: { route: { type: "choice", choice: "option_999" } } }))) as typeof fetch;
+  assert.equal((await routeRequest(request(), h.ctx, typesafe, { ...h.options, fetch: bad, decisionKey: "key" })).model, qualifier);
+  assert.equal(h.records[0]?.reason, "invalid-output");
+  const previous = { model: executor, thinkingLevel: "low" as const };
+  assert.equal((await routeRequest(request({ previous }), h.ctx, typesafe,
+    { ...h.options, fetch: bad, decisionKey: "key" })).thinkingLevel, "low");
+  assert.equal((await routeRequest(request(), h.ctx, typesafe, { ...h.options, decisionKey: "" })).model, qualifier);
+  // An absent key is tested with an empty environment, not a paid API call.
+  const noFallback = parseConfig({ qualifier: { backend: "typesafe", model: "jev-latest" } });
+  await assert.rejects(routeRequest(request(), h.ctx, noFallback,
+    { ...h.options, fetch: bad, decisionKey: "key" }), /no eligible fallback/);
+  assert.equal(h.records.at(-1)?.outcome, "error");
+  const disappearing = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const payload = JSON.parse(init?.body as string);
+    const choice = Object.keys(payload.questions.route.criteria).find((id) =>
+      payload.questions.route.criteria[id].model === executor.id);
+    h.available([qualifier, auto]);
+    return new Response(JSON.stringify({ answers: { route: { type: "choice", choice } } }));
+  }) as typeof fetch;
+  assert.equal((await routeRequest(request(), h.ctx, typesafe,
+    { ...h.options, fetch: disappearing, decisionKey: "key" })).model, qualifier);
+  assert.equal(h.records.at(-1)?.reason, "invalid-output");
+});
+
+test("decision classifier rejects more than 255 pairs without dropping candidate options", async () => {
+  const h = setup();
+  h.available([qualifier, ...Array.from({ length: 256 }, (_, i) => model(`m${i}`, { reasoning: false })), auto]);
+  const typesafe = parseConfig({ qualifier: { backend: "typesafe", model: "jev-latest",
+    fallback: { provider: "test", model: "small" } } });
+  let calls = 0;
+  const route = await routeRequest(request(), h.ctx, typesafe, { ...h.options, decisionKey: "key",
+    fetch: (async () => { calls++; throw new Error("not expected"); }) as typeof fetch });
+  assert.equal(route.model, qualifier);
+  assert.equal(calls, 0);
+  assert.equal(h.records[0]?.reason, "input-too-large");
+});
+
+test("TypeSafe deadline and cancellation abort fetch without late decision records", async () => {
+  const h = setup();
+  const typesafe = parseConfig({ qualifier: { backend: "typesafe", model: "jev-latest",
+    fallback: { provider: "test", model: "small" } } });
+  let complete!: (response: Response) => void;
+  let started!: () => void;
+  let signal: AbortSignal | undefined;
+  const ready = new Promise<void>((resolve) => { started = resolve; });
+  const fetcher = (async (_url: string | URL | Request, init?: RequestInit) => {
+    signal = init?.signal as AbortSignal;
+    started();
+    return new Promise<Response>((resolve) => { complete = resolve; });
+  }) as typeof fetch;
+  const controller = new AbortController();
+  const pending = routeRequest(request({ signal: controller.signal }), h.ctx, typesafe,
+    { ...h.options, fetch: fetcher, decisionKey: "key" });
+  await ready;
+  controller.abort();
+  await assert.rejects(pending, { name: "AbortError" });
+  assert.equal(signal?.aborted, true);
+  complete(new Response('{}'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.records.length, 0);
+  const timed = await routeRequest(request(), h.ctx, typesafe,
+    { ...h.options, fetch: fetcher, decisionKey: "key", timeoutMs: 10 });
+  assert.equal(timed.model, qualifier);
+  assert.equal(signal?.aborted, true);
+  assert.equal(h.records[0]?.reason, "timeout");
+  complete(new Response('{}'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.records.length, 1);
 });
 
 test("abort before or during qualification never falls back, records or dispatches late", async () => {
