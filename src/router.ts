@@ -33,6 +33,8 @@ export interface RoutingRecord {
   durationMs: number;
   usage?: Usage | { input_tokens: number; output_tokens: number };
   reason?: Failure;
+  confidence?: number;
+  probabilities?: { option: string; provider: string; model: string; thinkingLevel: ModelThinkingLevel; probability: number }[];
   selected?: { provider: string; model: string; thinkingLevel: ModelThinkingLevel };
 }
 
@@ -246,12 +248,35 @@ async function qualify(
   }, signal, timeoutMs);
 }
 
+type DecisionPair = { candidate: Candidate; level: ModelThinkingLevel };
+type DecisionDiagnostics = Pick<RoutingRecord, "confidence" | "probabilities">;
+
+function decisionDiagnostics(answer: Record<string, unknown>, pairs: DecisionPair[]): DecisionDiagnostics {
+  const validProbability = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+  const reported = answer.probabilities;
+  const entries = Array.isArray(reported) ? reported.slice(0, 255) : undefined;
+  // Only persist known options and numeric scores, never arbitrary provider response fields.
+  const probabilities = entries || isObject(reported) ? pairs.flatMap(({ candidate: { model }, level }, index) => {
+    const option = `option_${index}`;
+    const probability = entries
+      ? entries.find((entry) => isObject(entry) && entry.value === option)?.probability
+      : Object.hasOwn(reported as object, option) ? (reported as Record<string, unknown>)[option] : undefined;
+    return validProbability(probability)
+      ? [{ option, provider: model.provider, model: model.id, thinkingLevel: level, probability }] : [];
+  }) : undefined;
+  return {
+    ...(validProbability(answer.confidence) ? { confidence: answer.confidence } : {}),
+    ...(probabilities === undefined ? {} : { probabilities }),
+  };
+}
+
 // Decision endpoints return a typed Choice, not chat/completions text.
 // Opaque option ids prevent model names (including slashes) from becoming API field names.
 async function decideWithDecisionModel(
   request: ModelRouteRequest, eligible: Candidate[], config: DecisionQualifier, key: string,
   signal: AbortSignal | undefined, timeoutMs: number, fetcher: typeof fetch,
-): Promise<{ route?: ModelRoute; usage?: { input_tokens: number; output_tokens: number } }> {
+): Promise<{ route?: ModelRoute; usage?: { input_tokens: number; output_tokens: number } } & DecisionDiagnostics> {
   const pairs = eligible.flatMap((candidate) => candidate.levels.map((level) => ({ candidate, level })));
   if (pairs.length > 255) throw new DecisionInputTooLarge();
   if (pairs.length === 1) return { route: { model: pairs[0]!.candidate.model, thinkingLevel: pairs[0]!.level } };
@@ -297,7 +322,7 @@ async function decideWithDecisionModel(
       (result.usage.output_tokens as number) >= 0
       ? { input_tokens: result.usage.input_tokens as number, output_tokens: result.usage.output_tokens as number } : undefined;
     return { route: pair && answer === `option_${index}`
-      ? { model: pair.candidate.model, thinkingLevel: pair.level } : undefined, usage };
+      ? { model: pair.candidate.model, thinkingLevel: pair.level } : undefined, usage, ...decisionDiagnostics(routeAnswer, pairs) };
   }, signal, timeoutMs);
 }
 
@@ -308,7 +333,7 @@ class DecisionInputTooLarge extends Error {}
 async function decideWithJev(
   request: ModelRouteRequest, eligible: Candidate[], ctx: RouterContext, modelId: string,
   timeoutMs: number,
-): Promise<{ route?: ModelRoute; usage?: Usage; providerError?: boolean }> {
+): Promise<{ route?: ModelRoute; usage?: Usage; providerError?: boolean } & DecisionDiagnostics> {
   const model = ctx.modelRegistry.findOfType("classifier", "typesafe", modelId);
   if (!model) return { providerError: true };
   const pairs = eligible.flatMap((candidate) => candidate.levels.map((level) => ({ candidate, level })));
@@ -335,7 +360,8 @@ async function decideWithJev(
   const index = /^option_(0|[1-9]\d*)$/.test(answer) ? Number(answer.slice(7)) : -1;
   const pair = pairs[index];
   return { route: pair && answer === `option_${index}`
-    ? { model: pair.candidate.model, thinkingLevel: pair.level } : undefined, usage: result.usage };
+    ? { model: pair.candidate.model, thinkingLevel: pair.level } : undefined, usage: result.usage,
+    ...decisionDiagnostics(result.answers.route as unknown as Record<string, unknown>, pairs) };
 }
 
 export async function routeRequest(
@@ -360,13 +386,14 @@ export async function routeRequest(
   const configQualifier = config.qualifier;
   let response: AssistantMessage | undefined;
   let usage: RoutingRecord["usage"];
+  let diagnostics: DecisionDiagnostics = {};
   let selected: ModelRoute | undefined;
   let reason: Failure | undefined;
   if ("backend" in configQualifier) {
     try {
       const nativeJev = configQualifier.backend === "typesafe" && !configQualifier.endpoint &&
         !configQualifier.apiKeyEnv && options.decisionKey === undefined && options.fetch === undefined;
-      let result: { route?: ModelRoute; usage?: RoutingRecord["usage"]; providerError?: boolean } | undefined;
+      let result: ({ route?: ModelRoute; usage?: RoutingRecord["usage"]; providerError?: boolean } & DecisionDiagnostics) | undefined;
       if (nativeJev) {
         result = await decideWithJev(request, eligible, ctx, configQualifier.model, options.timeoutMs ?? 5000);
       } else {
@@ -379,6 +406,7 @@ export async function routeRequest(
       if (!result) reason = "unavailable";
       else {
         usage = result.usage;
+        diagnostics = { confidence: result.confidence, probabilities: result.probabilities };
         const current = candidates(request, ctx);
         selected = result.route && reuse({ model: result.route.model, thinkingLevel: result.route.thinkingLevel }, current);
         reason = selected ? undefined : result.providerError ? "provider-error" : "invalid-output";
@@ -420,6 +448,7 @@ export async function routeRequest(
     outcome: selected ? "selected" : route ? "fallback" : "error",
     durationMs: Math.round(performance.now() - started),
     usage: usage ?? response?.usage,
+    ...diagnostics,
     reason,
     selected: route && { provider: route.model.provider, model: route.model.id, thinkingLevel: route.thinkingLevel },
   });

@@ -342,7 +342,8 @@ test("direct Jev uses Pi's classifier registry and credential resolution, never 
         return pair.model === executor.id && pair.thinkingLevel === "high";
       });
       assert(choice);
-      return { stopReason: "stop", answers: { route: { type: "choice", choice } },
+      return { stopReason: "stop", answers: { route: { type: "choice", choice,
+        confidence: 0.8, probabilities: { [choice]: 0.8, option_0: 0.2 } } },
         usage: { input: 25, output: 1, totalTokens: 26, cost: { total: 0 } } };
     },
   });
@@ -352,6 +353,11 @@ test("direct Jev uses Pi's classifier registry and credential resolution, never 
     parseConfig({ qualifier: { backend: "typesafe", model: "jev-latest" } }), h.options);
   assert.equal(route.model, executor);
   assert.equal(route.thinkingLevel, "high");
+  assert.equal(h.records[0]?.confidence, 0.8);
+  assert.equal(h.records[0]?.probabilities?.length, 2);
+  assert.deepEqual(h.records[0]?.probabilities?.find((entry) => entry.model === executor.id),
+    { option: h.records[0]?.probabilities?.find((entry) => entry.model === executor.id)?.option,
+      provider: executor.provider, model: executor.id, thinkingLevel: "high", probability: 0.8 });
   assert(signal);
   assert.equal(h.calls.length, 0);
   assert(!JSON.stringify(input).includes("SECRET_TOOL"));
@@ -397,6 +403,11 @@ test("TypeSafe calls the decision endpoint with bounded projected state and exac
   assert(!JSON.stringify(input).includes("SECRET_"));
   assert.equal(input.model, "jev-latest");
   assert.deepEqual(h.records[0]?.usage, { input_tokens: 100, output_tokens: 12 });
+  assert.equal(h.records[0]?.confidence, 1);
+  assert.equal(h.records[0]?.probabilities?.length, 1);
+  assert.equal(h.records[0]?.probabilities?.[0]?.model, executor.id);
+  assert.equal(h.records[0]?.probabilities?.[0]?.thinkingLevel, "high");
+  assert.equal(h.records[0]?.probabilities?.[0]?.probability, 1);
   assert(!JSON.stringify(h.records).includes("test-key"));
 });
 
@@ -452,10 +463,43 @@ test("OpenAI Decisions uses its own wire format and a configurable full endpoint
     assert.equal(calls, 1);
     assert.equal(h.calls.length, 0);
     assert.deepEqual(h.records[0]?.usage, { input_tokens: 42, output_tokens: 0 });
+    assert.equal(h.records[0]?.confidence, 1);
+    assert.equal(h.records[0]?.probabilities?.[0]?.model, executor.id);
+    assert.equal(h.records[0]?.probabilities?.[0]?.thinkingLevel, "high");
+    assert.equal(h.records[0]?.probabilities?.[0]?.probability, 1);
     assert(!JSON.stringify(h.records).includes("decision-test-key"));
   } finally {
     if (prior === undefined) delete process.env.GATEWAY_KEY;
     else process.env.GATEWAY_KEY = prior;
+  }
+});
+
+test("decision diagnostics filter unsafe scores without changing fallback or synthesizing probabilities", async () => {
+  for (const backend of ["typesafe", "openai"] as const) {
+    const h = setup();
+    const config = parseConfig({ qualifier: { backend, model: "decision", fallback: { provider: "test", model: "small" } } });
+    const scores = { option_0: 0, option_1: 0.4, option_2: -1, option_3: 2,
+      option_4: "0.5", option_5: null, option_999: 0.9, SECRET_RESPONSE: 0.8 };
+    const fetcher = (async () => {
+      const answer = { type: "choice", choice: "option_999", confidence: 2,
+        probabilities: backend === "typesafe" ? scores
+          : Object.entries(scores).map(([value, probability]) => ({ value, probability })) };
+      return new Response(JSON.stringify({ answers: backend === "typesafe" ? { route: answer }
+        : [{ ...answer, name: "route" }] }));
+    }) as typeof fetch;
+    const route = await routeRequest(request(), h.ctx, config, { ...h.options, fetch: fetcher, decisionKey: "key" });
+    assert.equal(route.model, qualifier);
+    assert.equal(h.records[0]?.outcome, "fallback");
+    assert.equal(h.records[0]?.confidence, undefined);
+    assert.deepEqual(h.records[0]?.probabilities?.map(({ option, probability }) => ({ option, probability })),
+      [{ option: "option_0", probability: 0 }, { option: "option_1", probability: 0.4 }]);
+    assert(!JSON.stringify(h.records).includes("SECRET_RESPONSE"));
+    const absent = (async () => new Response(JSON.stringify({ answers: backend === "typesafe"
+      ? { route: { type: "choice", choice: "option_0" } }
+      : [{ name: "route", type: "choice", choice: "option_0" }] }))) as typeof fetch;
+    await routeRequest(request(), h.ctx, config, { ...h.options, fetch: absent, decisionKey: "key" });
+    assert.equal(h.records[1]?.probabilities, undefined);
+    assert.equal(h.records[1]?.confidence, undefined);
   }
 });
 

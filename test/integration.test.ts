@@ -159,7 +159,8 @@ test("file-loaded OpenAI decision backend routes through an overridden endpoint 
       return description.model === "executor" && description.thinkingLevel === "high";
     });
     assert(choice);
-    return new Response(JSON.stringify({ answers: [{ name: "route", type: "choice", choice: choice.value }],
+    return new Response(JSON.stringify({ answers: [{ name: "route", type: "choice", choice: choice.value,
+      confidence: 0.75, probabilities: [{ value: choice.value, probability: 0.75 }] }],
       usage: { input_tokens: 20, output_tokens: 0 } }));
   });
   h.responses([fauxAssistantMessage("Decision routed")]);
@@ -169,6 +170,14 @@ test("file-loaded OpenAI decision backend routes through an overridden endpoint 
   assert.equal(h.calls[0]?.options?.reasoning, "high");
   assert.equal(decisionCalls, 1);
   assert.equal(h.decisions().length, 1);
+  const entry = h.decisions()[0]!;
+  assert.equal(entry.type, "custom");
+  assert(entry.type === "custom");
+  const record = entry.data as { confidence: number; probabilities: { model: string; thinkingLevel: string; probability: number }[] };
+  assert.equal(record.confidence, 0.75);
+  assert.equal(record.probabilities[0]?.model, "executor");
+  assert.equal(record.probabilities[0]?.thinkingLevel, "high");
+  assert.equal(record.probabilities[0]?.probability, 0.75);
   assert(!JSON.stringify(h.decisions()).includes("test-secret"));
 });
 
