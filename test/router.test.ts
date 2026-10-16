@@ -428,6 +428,22 @@ test("TypeSafe full endpoint override uses the System One shape, not the OpenAI 
     { ...h.options, fetch: fetcher, decisionKey: "key" })).model, executor);
 });
 
+test("custom TypeSafe endpoint works without an API key and sends no Authorization", async () => {
+  const h = setup();
+  const typesafe = parseConfig({ qualifier: { backend: "typesafe", model: "clef-flash-oQ4e",
+    endpoint: "http://127.0.0.1:8000/v1/systemone" } });
+  const fetcher = (async (_url: string | URL | Request, init?: RequestInit) => {
+    assert.equal((init?.headers as Record<string, string>).Authorization, undefined);
+    const payload = JSON.parse(init?.body as string);
+    const choice = Object.keys(payload.questions.route.criteria).find((id) =>
+      payload.questions.route.criteria[id].model === executor.id);
+    return new Response(JSON.stringify({ answers: { route: { type: "choice", choice } } }));
+  }) as typeof fetch;
+  const saved = process.env.TYPESAFE_API_KEY; delete process.env.TYPESAFE_API_KEY;
+  try { assert.equal((await routeRequest(request(), h.ctx, typesafe, { ...h.options, fetch: fetcher })).model, executor); }
+  finally { if (saved !== undefined) process.env.TYPESAFE_API_KEY = saved; }
+});
+
 test("OpenAI Decisions uses its own wire format and a configurable full endpoint", async () => {
   const h = setup();
   const openai = parseConfig({ qualifier: { backend: "openai", model: "gpt-6-luna",

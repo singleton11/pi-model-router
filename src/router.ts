@@ -274,7 +274,7 @@ function decisionDiagnostics(answer: Record<string, unknown>, pairs: DecisionPai
 // Decision endpoints return a typed Choice, not chat/completions text.
 // Opaque option ids prevent model names (including slashes) from becoming API field names.
 async function decideWithDecisionModel(
-  request: ModelRouteRequest, eligible: Candidate[], config: DecisionQualifier, key: string,
+  request: ModelRouteRequest, eligible: Candidate[], config: DecisionQualifier, key: string | undefined,
   signal: AbortSignal | undefined, timeoutMs: number, fetcher: typeof fetch,
 ): Promise<{ route?: ModelRoute; usage?: { input_tokens: number; output_tokens: number } } & DecisionDiagnostics> {
   const pairs = eligible.flatMap((candidate) => candidate.levels.map((level) => ({ candidate, level })));
@@ -299,7 +299,7 @@ async function decideWithDecisionModel(
     const endpoint = config.endpoint ?? (config.backend === "typesafe"
       ? "https://api.typesafe.ai/v1/systemone" : "https://api.openai.com/v1/decisions");
     const response = await fetcher(endpoint, {
-      method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      method: "POST", headers: { ...(key ? { Authorization: `Bearer ${key}` } : {}), "Content-Type": "application/json" },
       body, signal: deadlineSignal, redirect: "error",
     });
     if (!response.ok) throw new Error("Decision request failed");
@@ -399,7 +399,8 @@ export async function routeRequest(
       } else {
         const key = options.decisionKey ?? process.env[configQualifier.apiKeyEnv ??
           (configQualifier.backend === "typesafe" ? "TYPESAFE_API_KEY" : "OPENAI_API_KEY")];
-        if (key) result = await decideWithDecisionModel(request, eligible, configQualifier, key,
+        // A custom TypeSafe endpoint (e.g. local oMLX) may run without auth.
+        if (key || (configQualifier.backend === "typesafe" && configQualifier.endpoint)) result = await decideWithDecisionModel(request, eligible, configQualifier, key,
           request.signal, options.timeoutMs ?? 5000, options.fetch ?? fetch);
       }
       request.signal?.throwIfAborted();
